@@ -21,11 +21,6 @@
   in
     netmaskLookups."${netmask}";
 
-  # Lookup table from node-type to experiment link interface name.
-  nodeExperimentLink0 = {
-    "m510" = "eno1d1";
-  };
-
   # First, convert the manifest XML to JSON, and import it into a Nix
   # attribute set. We can then traverse it and build a node map.
   manifestJson = pkgs.runCommand "manifest.json" {} ''
@@ -50,14 +45,70 @@
   xmlnsRspec = "http://www.geni.net/resources/rspec/3";
   xmlnsEmulab = "http://www.protogeni.net/resources/rspec/ext/emulab/1";
 
+  # Filter out any nodes which don't have a hardware_type attribute
+  # (e.g. blockstorage nodes).
+  #
+  # TODO: check if this is the right filter to use.
+  mNodeFilter = node: node ? "{${xmlnsRspec}}hardware_type";
+
+  # Ignoring the mNodeFilter!
+  mNodeByClientId = clientId:
+    lib.findSingle
+      (node: node."@client_id" == clientId)
+      null
+      (abort "Multiple nodes for ${clientId} found!")
+      (ensureList mRspec."{${xmlnsRspec}}node");
+
+  # Ignoring the mNodeFilter!
+  mNodeByInterfaceClientId = ifClientId:
+    lib.findSingle
+      (node:
+        (
+          lib.findSingle
+            (interface: interface."@client_id" == ifClientId)
+            null
+            (abort "Multiple interfaces for interface client_id ${ifClientId} found!")
+            (mNodeInterfaces node)
+        ) != null
+      )
+      null
+      (abort "Multiple nodes posessing interface client_id ${ifClientId} found!")
+      (ensureList mRspec."{${xmlnsRspec}}node");
+
   # Aliases to commonly used sub-nodes in the manifest:
   mRspec = manifest."{${xmlnsRspec}}rspec";
   mEmulabPortal = mRspec."{${xmlnsEmulab}}portal";
-  mNodes = ensureList mRspec."{${xmlnsRspec}}node";
+  mNodes = lib.filter mNodeFilter (ensureList mRspec."{${xmlnsRspec}}node");
   mNodeHardwareType = node: node."{${xmlnsRspec}}hardware_type";
   mNodeHost = node: node."{${xmlnsRspec}}host";
   mNodeInterfaces = node: ensureList (node."{${xmlnsRspec}}interface");
   mNodeInterfaceIps = interface: ensureList (interface."{${xmlnsRspec}}ip");
+  mLinks = ensureList mRspec."{${xmlnsRspec}}link";
+  mLinkInterfaceRefs = link: ensureList link."{${xmlnsRspec}}interface_ref";
+  mNodeInterfaceLink = interface:
+    lib.findSingle
+      (link:
+        (
+          lib.findSingle
+            (ifRef: ifRef."@client_id" == interface."@client_id")
+            null
+            (abort "Multiple link refs for interface ${interface."@client_id"} found!")
+            (mLinkInterfaceRefs link)
+        )
+        != null
+      )
+      (abort "Link for interface ${interface."@client_id"} not found!")
+      (abort "Multiple links for interface ${interface."@client_id"} found!")
+      mLinks;
+
+  mLinkDatasetNode = link:
+    lib.findSingle
+      (node: node."{${xmlnsRspec}}sliver_type"."@name" == "emulab-blockstore")
+      null
+      (abort "Multiple datastores on link ${link."@client_id"}, this is not (yet) supported!")
+      (builtins.map
+        (interfaceRef: mNodeByInterfaceClientId interfaceRef."@client_id")
+        (mLinkInterfaceRefs link));
 
   # Generate an "experiment config" struct that is easier to parse
   # than the manifest XML converted to JSON:
@@ -75,9 +126,8 @@
           builtins.tail (lib.splitString "." (mNodeHost nodeSpec)."@name"));
         managementIPv4 = (mNodeHost nodeSpec)."@ipv4";
 
-        experimentLinks = lib.listToAttrs (builtins.map (interfaceSpec:
+        experimentInterfaces = lib.listToAttrs (builtins.map (interfaceSpec:
           lib.nameValuePair interfaceSpec."@client_id" {
-
             # Magic to convert the non-colon-separated MAC address into a
             # colon-separated one:
             macAddress = lib.concatStringsSep ":" (lib.reverseList (
@@ -88,8 +138,6 @@
                   [ (lib.toLower char) ] ++ acc
               ) [] (lib.filter (char: char != "") (lib.splitString "" interfaceSpec."@mac_address"))
             ));
-
-            ifname = nodeExperimentLink0."${(mNodeHardwareType nodeSpec)."@name"}";
 
             ipv4 = let
               addrSpec =
@@ -103,6 +151,31 @@
                 address = addrSpec."@address";
                 netmask = addrSpec."@netmask";
                 prefixLength = prefixLengthFromIPv4Netmask addrSpec."@netmask";
+              } else null;
+
+            vlanTag = let
+              linkSpec = mNodeInterfaceLink interfaceSpec;
+            in
+              if (
+                linkSpec ? "{${xmlnsEmulab}}vlan_tagging"
+                && linkSpec."{${xmlnsEmulab}}vlan_tagging"."@enabled" == true
+              ) then
+                linkSpec."@vlantag"
+              else
+                null;
+
+            linkId = (mNodeInterfaceLink interfaceSpec)."@client_id";
+
+            dataset = let
+              datasetNode = mLinkDatasetNode (mNodeInterfaceLink interfaceSpec);
+            in
+              if datasetNode != null then {
+                serverIPv4 = (
+                  builtins.head (
+                    mNodeInterfaceIps (
+                      builtins.head (
+                        mNodeInterfaces datasetNode)))
+                )."@address";
               } else null;
           }
         ) (mNodeInterfaces nodeSpec));

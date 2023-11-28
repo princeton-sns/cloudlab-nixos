@@ -1,4 +1,4 @@
-{ cloudlabUser }:
+{ cloudlabUser, addlSources ? [] }:
 
 let
   krops = (import <nixpkgs> {}).fetchgit {
@@ -15,7 +15,7 @@ let
     manifestXml = builtins.readFile ./manifest.xml;
   };
 
-  source = nodeId: lib.evalSource [{
+  source = nodeId: lib.evalSource [({
     # If you want to build from git, uncomment this. Otherwise we'll
     # just use the pre-configured channel.
     #
@@ -31,11 +31,14 @@ let
     # };
     nixpkgs.symlink = "/nix/var/nix/profiles/per-user/root/channels/nixos/";
 
-    # Deploy the ./config directory to the hosts
-    config.file = toString ./config;
+
+    miniond.git = {
+      ref = "4e64c155869c71bddd045c415ce34a43ad8cac9c";
+      url = https://github.com/lschuermann/miniond;
+    };
 
     # Create a <nixos-config> path entry for the node config:
-    nixos-config.symlink = "config/node-config.nix";
+    nixos-config.file = toString ./node-config.nix;
 
     # Copy the XML manifest, such that it can be interpreted by the
     # nodes. Also create a file that indicates this node's ID:
@@ -45,20 +48,34 @@ let
     # Copy the XML manifest parsing logic, such that it can be
     # imported in the node config:
     "parseManifest.nix".file = toString ./parseManifest.nix;
-  }];
+  } // (
+    lib.foldl (acc: val: acc // val) {} (
+      lib.map
+        (sourceFn:
+          if builtins.typeOf sourceFn == "lambda" then
+            (sourceFn nodeId)
+          else sourceFn)
+        addlSources
+    )
+  ))];
 
   targets =
     builtins.map (nodeId: let
       nodeConfig = experimentConfig.nodes."${nodeId}";
     in {
-      name = "cloudlab-experiment-deploy-${nodeId}";
-      path = pkgs.krops.writeDeploy "deploy" {
+      name = "deploy-${nodeId}";
+      path = pkgs.krops.writeCommand "deploy-${nodeId}" {
         source = source nodeId;
         target = lib.mkTarget "${cloudlabUser}@${nodeConfig.hostname}.${nodeConfig.domain}" // {
           sudo = true;
           extraOptions = [ "-o" "StrictHostKeyChecking=no" ];
         };
         force = true;
+        command = targetPath: ''
+          basename $(readlink -f "/sys/class/block/$(mount | grep "/nix/store" | cut -d " " -f1 | sed -e 's|^/dev||')/..") > ${targetPath}/boot-disk-
+          echo eno1d1 > ${targetPath}/experiment-link
+          nixos-rebuild -I "${targetPath}" switch
+        '';
       };
     }) (builtins.attrNames experimentConfig.nodes);
 
@@ -67,17 +84,27 @@ in
     targets
     ++ [
       {
-        name = "cloudlab-experiment-deploy-all";
+        name = "deploy-all";
         path = "${pkgs.writeShellScript "cloudlab-experiment-deploy-all.sh" ''
           #!${pkgs.bash}/bin/bash
-          exec ${pkgs.multitail}/bin/multitail ${
+          exec ${pkgs.multitail}/bin/multitail -s 3 ${
             lib.concatStringsSep " " (
               builtins.map (target:
-                "-l ${target.path}"
+                "-l '${target.path} || sleep inf'"
               ) targets
             )
           }
         ''}";
       }
-    ]
+    ] ++ (
+      builtins.map (nodeId: let
+        nodeConfig = experimentConfig.nodes."${nodeId}";
+      in {
+        name = "ssh-${nodeId}";
+        path = pkgs.writeShellScript "cloudlab-experiment-ssh-${nodeId}.sh" ''
+          #!${pkgs.bash}/bin/bash
+          exec ssh ${cloudlabUser}@${nodeConfig.hostname}.${nodeConfig.domain}
+        '';
+      }) (builtins.attrNames experimentConfig.nodes)
+    )
   )
