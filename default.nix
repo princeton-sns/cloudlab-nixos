@@ -1,4 +1,4 @@
-{ cloudlabUser, addlSources ? [] }:
+{ cloudlabUser, manifestXml, addlSources ? [] }:
 
 let
   krops = (import <nixpkgs> {}).fetchgit {
@@ -11,8 +11,7 @@ let
   pkgs = import "${krops}/pkgs" {};
 
   experimentConfig = import ./parseManifest.nix {
-    inherit pkgs;
-    manifestXml = builtins.readFile ./manifest.xml;
+    inherit pkgs manifestXml;
   };
 
   source = nodeId: lib.evalSource [({
@@ -42,7 +41,7 @@ let
 
     # Copy the XML manifest, such that it can be interpreted by the
     # nodes. Also create a file that indicates this node's ID:
-    "manifest.xml".file = toString ./manifest.xml;
+    "manifest.xml".file = "${pkgs.writeText "manifest.xml" manifestXml}";
     node-id.file = "${pkgs.writeText "node-id.txt" nodeId}";
 
     # Copy the XML manifest parsing logic, such that it can be
