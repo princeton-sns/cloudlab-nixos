@@ -30,7 +30,6 @@ let
     # };
     nixpkgs.symlink = "/nix/var/nix/profiles/per-user/root/channels/nixos/";
 
-
     miniond.git = {
       ref = "4e64c155869c71bddd045c415ce34a43ad8cac9c";
       url = https://github.com/lschuermann/miniond;
@@ -47,6 +46,10 @@ let
     # Copy the XML manifest parsing logic, such that it can be
     # imported in the node config:
     "parseManifest.nix".file = toString ./parseManifest.nix;
+
+    # Include the bootstrap-deploy script, to determine certain
+    # other node parameters before building:
+    "bootstrap-deploy.sh".file = toString ./bootstrap-deploy.sh;
   } // (
     lib.foldl (acc: val: acc // val) {} (
       lib.map
@@ -71,8 +74,7 @@ let
         };
         force = true;
         command = targetPath: ''
-          basename $(readlink -f "/sys/class/block/$(mount | grep "/nix/store" | cut -d " " -f1 | sed -e 's|^/dev||')/..") > ${targetPath}/boot-disk-
-          echo eno1d1 > ${targetPath}/experiment-link
+          sh ${targetPath}/bootstrap-deploy.sh "${targetPath}"
           nixos-rebuild -I "${targetPath}" switch
         '';
       };
