@@ -97,6 +97,19 @@ in
           }
         ''}";
       }
+      {
+        name = "ssh-all";
+        path = "${pkgs.writeShellScript "cloudlab-experiment-ssh-all.sh" ''
+          #!${pkgs.bash}/bin/bash
+          exec ${pkgs.multitail}/bin/multitail -s 3 ${
+            lib.concatStringsSep " " (
+              builtins.map (nodeConfig:
+                "-l \"ssh ${cloudlabUser}@${nodeConfig.hostname}.${nodeConfig.domain} '$1' || sleep inf\""
+              ) (builtins.attrValues experimentConfig.nodes)
+            )
+          }
+        ''}";
+      }
     ] ++ (
       builtins.map (nodeId: let
         nodeConfig = experimentConfig.nodes."${nodeId}";
